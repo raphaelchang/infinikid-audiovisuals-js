@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <script src="https://unpkg.com/ccapture.js@1.1.0/build/CCapture.all.min.js"></script>
+    <link rel="stylesheet" type="text/css" href="style.css">
+    <meta charset="utf-8" />
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
+  </head>
+  <body>
+    <script src="osc-browser.js"></script>
+    <script type="x-shader/x-vertex" id="vertexShader">
+#define M_PI 3.1415926535897932384626433832795
+varying vec3 vNormal;
+varying vec4 vVertexCoord;
+varying vec4 vCameraCoord;
+varying mat4 viewMat;
+varying mat4 modelMat;
+uniform float time;
+void main(){
+    vNormal = normalize(normalMatrix * normal);
+    viewMat = viewMatrix;
+    modelMat = modelMatrix;
+    vVertexCoord = vec4(position, 1.0);
+    vCameraCoord = modelViewMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * vCameraCoord;
+
+
+//    float maxOffLen = 0.1;
+//    vec2 p = uv * vec2(M_PI*2.0);
+//
+//    vec3 offset = normalize(normal) * vec3(sin(time * 4.0 + p.y ) * maxOffLen - maxOffLen);
+//
+//    gl_Position.x += offset.x;
+//    gl_Position.y += offset.y;
+//    gl_Position.z += offset.z;
+}
+    </script>
+    <script type="x-shader/x-fragment" id="fragmentShader">
+varying vec4 vVertexCoord;
+varying vec4 vCameraCoord;
+varying vec3 vNormal;
+varying mat4 viewMat;
+varying mat4 modelMat;
+uniform float time;
+uniform int shape;
+
+struct PointLight {
+  vec3 color;
+  vec3 position; // light position, in camera coordinates
+  float distance; // used for attenuation purposes. Since
+                  // we're writing our own shader, it can
+                  // really be anything we want (as long as
+                  // we assign it to our light in its
+                  // "distance" field
+};
+uniform PointLight pointLights[NUM_POINT_LIGHTS];
+
+const int MAX_MARCHING_STEPS = 255;
+const float MIN_DIST = 0.0;
+const float MAX_DIST = 100.0;
+const float PRECISION = 0.001;
+const float EPSILON = 0.0005;
+const float PI = 3.14159265359;
+const float SPECULAR = 16.0;
+const vec4 COLOR_BACKGROUND = vec4(0., 0., 0., 0.);
+const vec4 COLOR_AMBIENT = vec4(0.42, 0.4, 0.6, 1.0);
+const vec4 COLOR_AMBIENT_OBJ = vec4(0.52, 0.60, 0.2, 1.0);
+
+// Rotation matrix around the X axis.
+mat3 rotateX(float theta) {
+    float c = cos(theta);
+    float s = sin(theta);
+    return mat3(
+        vec3(1, 0, 0),
+        vec3(0, c, -s),
+        vec3(0, s, c)
+    );
+}
+
+// Rotation matrix around the Y axis.
+mat3 rotateY(float theta) {
+    float c = cos(theta);
+    float s = sin(theta);
+    return mat3(
+        vec3(c, 0, s),
+        vec3(0, 1, 0),
+        vec3(-s, 0, c)
+    );
+}
+
+// Rotation matrix around the Z axis.
+mat3 rotateZ(float theta) {
+    float c = cos(theta);
+    float s = sin(theta);
+    return mat3(
+        vec3(c, -s, 0),
+        vec3(s, c, 0),
+        vec3(0, 0, 1)
+    );
+}
+
+float sdBoxFrame( vec3 p, vec3 b, float e )
+{
+  p = abs(p  )-b;
+  vec3 q = abs(p+e)-e;
+  return min(min(
+      length(max(vec3(p.x,q.y,q.z),0.0))+min(max(p.x,max(q.y,q.z)),0.0),
+      length(max(vec3(q.x,p.y,q.z),0.0))+min(max(q.x,max(p.y,q.z)),0.0)),
+      length(max(vec3(q.x,q.y,p.z),0.0))+min(max(q.x,max(q.y,p.z)),0.0));
+}
+
+float sdBox( vec3 p, vec3 b )
+{
+  vec3 q = abs(p) - b;
+  return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0);
+}
+
+float sdRoundBox( vec3 p, vec3 b, float r )
+{
+  vec3 q = abs(p) - b;
+  return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0) - r;
+}
+
+float sdSphere(vec3 p, float r, vec3 offset)
+{
+  return length(p - offset) - r;
+}
+
+vec3 calcSphereNormal(in vec3 p, float r, vec3 offset) {
+    vec4 col;
+    vec2 e = vec2(1, -1) * EPSILON;
+    return normalize(
+      e.xyy * sdSphere(p + e.xyy, r, offset) +
+      e.yyx * sdSphere(p + e.yyx, r, offset) +
+      e.yxy * sdSphere(p + e.yxy, r, offset) +
+      e.xxx * sdSphere(p + e.xxx, r, offset));
+}
+
+float sdTorus( vec3 p, vec2 t )
+{
+  vec2 q = vec2(length(p.xz)-t.x,p.y);
+  return length(q)-t.y;
+}
+
+float sdRoundCone( vec3 p, float r1, float r2, float h )
+{
+  // sampling independent computations (only depend on shape)
+  float b = (r1-r2)/h;
+  float a = sqrt(1.0-b*b);
+
+  // sampling dependant computations
+  vec2 q = vec2( length(p.xz), p.y );
+  float k = dot(q,vec2(-b,a));
+  if( k<0.0 ) return length(q) - r1;
+  if( k>a*h ) return length(q-vec2(0.0,h)) - r2;
+  return dot(q, vec2(a,b) ) - r1;
+}
+
+float sdOctahedron( vec3 p, float s )
+{
+  p = abs(p);
+  float m = p.x+p.y+p.z-s;
+  vec3 q;
+       if( 3.0*p.x < m ) q = p.xyz;
+  else if( 3.0*p.y < m ) q = p.yzx;
+  else if( 3.0*p.z < m ) q = p.zxy;
+  else return m*0.57735027;
+
+  float k = clamp(0.5*(q.z-q.y+s),0.0,s);
+  return length(vec3(q.x,q.y-s+k,q.z-k));
+}
+
+float sdEllipsoid( vec3 p, vec3 r )
+{
+  float k0 = length(p/r);
+  float k1 = length(p/(r*r));
+  return k0*(k0-1.0)/k1;
+}
+
+float sdLink( vec3 p, float le, float r1, float r2 )
+{
+  vec3 q = vec3( p.x, max(abs(p.y)-le,0.0), p.z );
+  return length(vec2(length(q.xy)-r1,q.z)) - r2;
+}
+
+float sdPlane( vec3 p, vec3 n, float h )
+{
+  // n must be normalized
+  return dot(p, n) + h;
+}
+
+vec4 permute(vec4 x){return mod(((x*34.0)+1.0)*x, 289.0);}
+vec4 taylorInvSqrt(vec4 r){return 1.79284291400159 - 0.85373472095314 * r;}
+vec3 fade(vec3 t) {return t*t*t*(t*(t*6.0-15.0)+10.0);}
+
+float cnoise(vec3 P){
+  vec3 Pi0 = floor(P); // Integer part for indexing
+  vec3 Pi1 = Pi0 + vec3(1.0); // Integer part + 1
+  Pi0 = mod(Pi0, 289.0);
+  Pi1 = mod(Pi1, 289.0);
+  vec3 Pf0 = fract(P); // Fractional part for interpolation
+  vec3 Pf1 = Pf0 - vec3(1.0); // Fractional part - 1.0
+  vec4 ix = vec4(Pi0.x, Pi1.x, Pi0.x, Pi1.x);
+  vec4 iy = vec4(Pi0.yy, Pi1.yy);
+  vec4 iz0 = Pi0.zzzz;
+  vec4 iz1 = Pi1.zzzz;
+
+  vec4 ixy = permute(permute(ix) + iy);
+  vec4 ixy0 = permute(ixy + iz0);
+  vec4 ixy1 = permute(ixy + iz1);
+
+  vec4 gx0 = ixy0 / 7.0;
+  vec4 gy0 = fract(floor(gx0) / 7.0) - 0.5;
+  gx0 = fract(gx0);
+  vec4 gz0 = vec4(0.5) - abs(gx0) - abs(gy0);
+  vec4 sz0 = step(gz0, vec4(0.0));
+  gx0 -= sz0 * (step(0.0, gx0) - 0.5);
+  gy0 -= sz0 * (step(0.0, gy0) - 0.5);
+
+  vec4 gx1 = ixy1 / 7.0;
+  vec4 gy1 = fract(floor(gx1) / 7.0) - 0.5;
+  gx1 = fract(gx1);
+  vec4 gz1 = vec4(0.5) - abs(gx1) - abs(gy1);
+  vec4 sz1 = step(gz1, vec4(0.0));
+  gx1 -= sz1 * (step(0.0, gx1) - 0.5);
+  gy1 -= sz1 * (step(0.0, gy1) - 0.5);
+
+  vec3 g000 = vec3(gx0.x,gy0.x,gz0.x);
+  vec3 g100 = vec3(gx0.y,gy0.y,gz0.y);
+  vec3 g010 = vec3(gx0.z,gy0.z,gz0.z);
+  vec3 g110 = vec3(gx0.w,gy0.w,gz0.w);
+  vec3 g001 = vec3(gx1.x,gy1.x,gz1.x);
+  vec3 g101 = vec3(gx1.y,gy1.y,gz1.y);
+  vec3 g011 = vec3(gx1.z,gy1.z,gz1.z);
+  vec3 g111 = vec3(gx1.w,gy1.w,gz1.w);
+
+  vec4 norm0 = taylorInvSqrt(vec4(dot(g000, g000), dot(g010, g010), dot(g100, g100), dot(g110, g110)));
+  g000 *= norm0.x;
+  g010 *= norm0.y;
+  g100 *= norm0.z;
+  g110 *= norm0.w;
+  vec4 norm1 = taylorInvSqrt(vec4(dot(g001, g001), dot(g011, g011), dot(g101, g101), dot(g111, g111)));
+  g001 *= norm1.x;
+  g011 *= norm1.y;
+  g101 *= norm1.z;
+  g111 *= norm1.w;
+
+  float n000 = dot(g000, Pf0);
+  float n100 = dot(g100, vec3(Pf1.x, Pf0.yz));
+  float n010 = dot(g010, vec3(Pf0.x, Pf1.y, Pf0.z));
+  float n110 = dot(g110, vec3(Pf1.xy, Pf0.z));
+  float n001 = dot(g001, vec3(Pf0.xy, Pf1.z));
+  float n101 = dot(g101, vec3(Pf1.x, Pf0.y, Pf1.z));
+  float n011 = dot(g011, vec3(Pf0.x, Pf1.yz));
+  float n111 = dot(g111, Pf1);
+
+  vec3 fade_xyz = fade(Pf0);
+  vec4 n_z = mix(vec4(n000, n100, n010, n110), vec4(n001, n101, n011, n111), fade_xyz.z);
+  vec2 n_yz = mix(n_z.xy, n_z.zw, fade_xyz.y);
+  float n_xyz = mix(n_yz.x, n_yz.y, fade_xyz.x);
+  return 2.2 * n_xyz;
+}
+
+float circle(in vec2 c, in float r, in vec2 p){
+    float d = distance(c, p) - r;
+    return d;
+}
+
+float opSmoothUnion2d(float d1, float d2, float radius){
+    vec2 intersectionSpace = vec2(d1 - radius, d2 - radius);
+    intersectionSpace = min(intersectionSpace, 0.);
+    float insideDistance = -length(intersectionSpace);
+    float simpleUnion = min(d1, d2);
+    float outsideDistance = max(simpleUnion, radius);
+    return insideDistance + outsideDistance;
+}
+
+float blobs(in vec2 p){
+    vec2 c1 = vec2(0.);
+    float r1 = 0.2;
+    vec2 c2 = 0.3*vec2(cos(time),sin(time));
+    float r2 = 0.2;
+    vec2 c3 = 0.3*vec2(cos(2.0*time),sin(4.0*time));
+    float r3 = 0.1;
+    vec2 c4 = 0.2*vec2(cos(time),-sin(time));
+    float r4 = 0.1;
+
+    float smooth_r = 0.1;
+    return smoothstep(0.0, 0.01, -opSmoothUnion2d(opSmoothUnion2d(circle(c1, r1, p), circle(c2, r2, p), smooth_r), opSmoothUnion2d(circle(c3, r3, p), circle(c4, r4, p), smooth_r), smooth_r));
+}
+
+
+float opSmoothUnion( float d1, float d2, float k, vec4 col1, vec4 col2, out vec4 col )
+{
+    float h = clamp( 0.5 + 0.5*(d2-d1)/k, 0.0, 1.0 );
+    col = mix( col2, col1, h ) - k*h*(1.0-h);
+    return mix( d2, d1, h ) - k*h*(1.0-h);
+}
+
+vec2 boxIntersection( in vec3 ro, in vec3 rd, vec3 boxSize, out vec3 outNormal )
+{
+    vec3 m = 1.0/rd; // can precompute if traversing a set of aligned boxes
+    vec3 n = m*ro;   // can precompute if traversing a set of aligned boxes
+    vec3 k = abs(m)*boxSize;
+    vec3 t1 = -n - k;
+    vec3 t2 = -n + k;
+    float tN = max( max( t1.x, t1.y ), t1.z );
+    float tF = min( min( t2.x, t2.y ), t2.z );
+    if( tN>tF || tF<0.0) return vec2(-1.0); // no intersection
+    outNormal = (tN>0.0) ? step(vec3(tN),t1) : // ro ouside the box
+                           step(t2,vec3(tF));  // ro inside the box
+    outNormal *= -sign(rd);
+    return vec2( tN, tF );
+}
+
+void worldX(in vec3 p, in int x, in vec3 ro, out float d, out vec4 col) {
+  if (x == 0) {
+    d = sdTorus(p * rotateZ(PI / 2.) * rotateX(time * 2. - PI / 2.), vec2(sin(time * 2.) * 0.4 + 0.9, 0.1));
+    col = vec4(0.52, 0.8, 0.3, 1.0);
+  }
+  if (x == 1) {
+    float r = abs(sin((p.x + time * 0.125 ) * 4.0 )) * 0.2 + 0.5;
+    float g = abs(sin((p.y + time * 0.245 ) * 2.0 )) * 0.2 + 0.5;
+    float b = abs(sin((p.y - time * 0.333 ) * 2.0 )) * 0.2 + 0.5;
+
+    r += cnoise(vec3(p.x*4.0,p.y*4.0, time)) * 0.1;
+    g += cnoise(vec3(p.x*8.0,p.y*5.0, time*2.0)) * 0.1;
+    b += cnoise(vec3(p.x*12.0,p.y*6.0, time*3.0)) * 0.1;
+
+    float sphereSize = 0.8 + 0.4 * sin(time);
+    vec3 shift = vec3(0.2, 0.4 * sin(time), 0.4 * cos(time));
+    // p -= shift;
+    float maxOffLen = 0.1;
+    p *= rotateX(-time);
+    vec3 offset = normalize(calcSphereNormal(p, sphereSize, vec3(0.0))) * vec3(sin(time * 4.0 + (p * 2. * PI).y ) * maxOffLen - maxOffLen);
+    p += offset;
+
+    d = sdEllipsoid(p, vec3(sphereSize / (2. + sin(time)), sphereSize, sphereSize));
+    col = vec4(r, g, b, 1.0);
+  }
+  if (x == 2) {
+    d = sdEllipsoid(p + 1.2 * vec3(sin(time * 3.), 0., 0.5 * sin(time * 1.5)), vec3(0.5 + 0.3 * cos(time * 6.), 0.3 - 0.1 * cos(time * 6.), 0.3 - 0.1 * cos(time * 6.)));
+    col = vec4(0.2, 0.4, 0.8, 1.0);
+  }
+  if (x == 3) {
+    d = sdOctahedron(p * rotateX(time * 2.), 0.5);
+    col = vec4(0.9, 0.2, 0.2, 1.0);
+  }
+  if (x == 4) {
+    d = sdLink(p, 0.2, 0.3, 0.1);
+    col = COLOR_AMBIENT_OBJ;
+  }
+  if (x == 5) {
+    mat3 rot = rotateY(0.2 * sin(time * 2.)) * rotateX(0.1 * cos(time * 2.));
+    vec3 p_rot = (vec4(p, 1.0) * inverse(modelMat)).xyz * rot;
+    d = sdRoundBox(p_rot, vec3(0.5, 0.5, 0.01), 0.01);
+    
+    col = blobs(p_rot.xy) * vec4(0.1 + 0.1 * sin(time * PI), 0.5 + 0.4 * cos(time), 0.5 + 0.4 * cos(time + PI), 1.0) + vec4(0.0, 0.0, 0.0, 1.0);
+  }
+}
+
+float scene(in vec3 p, in int face, in vec3 ro, out vec4 col) {
+  col = COLOR_AMBIENT;
+  float d_frame = sdBoxFrame(p, vec3(1.0, 1.0, 1.0), 0.05);
+  float d = d_frame;
+  float d_shape;
+  vec4 col_shape;
+  worldX(p, face, ro, d_shape, col_shape);
+  d = opSmoothUnion(d_frame, d_shape, 0.2, col, col_shape, col);
+  return d;
+}
+
+int getFace(vec3 ro, vec3 rd) {
+  vec3 norm;
+  boxIntersection(ro, rd, vec3(1., 1., 1.), norm);
+  if (abs(norm.x - 1.) < EPSILON) return 0;
+  if (abs(norm.x + 1.) < EPSILON) return 1;
+  if (abs(norm.y - 1.) < EPSILON) return 2;
+  if (abs(norm.y + 1.) < EPSILON) return 3;
+  if (abs(norm.z - 1.) < EPSILON) return 4;
+  if (abs(norm.z + 1.) < EPSILON) return 5;
+  return -1;
+}
+
+float rayMarch(vec3 ro, vec3 rd, int face, out vec4 col) {
+  float depth = MIN_DIST;
+  float d; // distance ray has travelled
+
+  for (int i = 0; i < MAX_MARCHING_STEPS; i++) {
+    vec3 p = ro + depth * rd;
+    d = scene(p, face, ro, col);
+    depth += d;
+    if (d < PRECISION || depth > MAX_DIST) break;
+  }
+
+  d = depth;
+
+  return d;
+}
+
+vec3 calcNormal(in vec3 p, int face, vec3 ro) {
+    vec4 col;
+    vec2 e = vec2(1, -1) * EPSILON;
+    return normalize(
+      e.xyy * scene(p + e.xyy, face, ro, col) +
+      e.yyx * scene(p + e.yyx, face, ro, col) +
+      e.yxy * scene(p + e.yxy, face, ro, col) +
+      e.xxx * scene(p + e.xxx, face, ro, col));
+}
+
+vec4 shade(in vec3 p, in vec3 normal, in vec4 col, in vec3 cam, in int face) {
+    vec4 ambient = vec4(0.2 * col.rgb, col.a);
+    vec4 diffuse = vec4(0., 0., 0., 0.);
+    vec4 specular = vec4(0., 0., 0., 0.);
+    for(int l = 0; l < NUM_POINT_LIGHTS; l++) {
+        vec3 lightPositionVert = (inverse(modelMat) * vec4(pointLights[l].position, 1.0)).xyz;
+        vec3 lightDirection = normalize(p
+                              - lightPositionVert);
+        vec3 newRayOrigin = p + normal * PRECISION * 2.;
+        vec4 temp;
+        float shadowRayLength = rayMarch(newRayOrigin, -lightDirection, face, temp);
+        if (shadowRayLength < length(lightPositionVert - newRayOrigin)) continue;
+        float di = clamp(dot(-lightDirection,
+                                 normal), 0.0, 1.0);
+        diffuse.rgb += di
+                           // * pointLights[l].color;
+                           * col.rgb;
+        if (di > 0.0) {
+            vec3 e = normalize(cam - p);
+            vec3 r = reflect(lightDirection, normal);
+            float si = pow(clamp(dot(e, r), 0.0, 1.0), SPECULAR);
+            specular.rgb += si * vec3(0.9);
+        }
+    }
+
+    return clamp(ambient + diffuse + specular, 0.0, 1.0);;
+}
+
+void main()
+{
+  vec4 col = vec4(0., 0., 0., 1.);
+  vec3 cam = cameraPosition;
+  vec3 ro = (inverse(modelMat) * vec4(cam, 1.0)).xyz;
+
+  vec3 rd = normalize(vVertexCoord.xyz - ro);
+  vec4 colOut;
+  int face = getFace(ro, rd);
+  float d = rayMarch(ro, rd, face, colOut); // signed distance value to closest object
+
+  if (d > MAX_DIST) {
+    col = COLOR_BACKGROUND;
+  } else {
+    vec3 p = ro + rd * d; // point discovered from ray marching
+    vec3 normal = calcNormal(p, face, ro); // surface normal
+    col = shade(p, normal, colOut, ro, face);
+  }
+
+  gl_FragColor = col;
+}
+    </script>
+    <script type="module" src="sketch.js"></script>
+  </body>
+</html>
+

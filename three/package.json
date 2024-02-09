@@ -1,0 +1,21 @@
+{
+    "name": "wavy",
+    "main": "index.js",
+    "version": "0.0.1",
+    "description": "3D art with OSC sync using three.js",
+    "author": "Raphael Chang",
+    "license": "(MIT OR GPL-2.0)",
+    "keywords": [
+        "Open Sound Control",
+        "OSC",
+        "sound",
+        "audio",
+        "music"
+    ],
+    "dependencies": {
+        "express": "4.17.1",
+        "osc": "2.4.2",
+        "three": "^0.161.0",
+        "ws": "7.5.3"
+    }
+}

@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <script src="https://unpkg.com/ccapture.js@1.1.0/build/CCapture.all.min.js"></script>
+    <link rel="stylesheet" type="text/css" href="style.css">
+    <meta charset="utf-8" />
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+        }
+    }
+    </script>
+  </head>
+  <body>
+    <script src="osc-browser.js"></script>
+    <script type="x-shader/x-vertex" id="vertexShader">
+#define M_PI 3.1415926535897932384626433832795
+varying vec3 vNormal;
+varying vec4 vVertexCoord;
+varying vec4 vCameraCoord;
+varying mat4 viewMat;
+varying mat4 modelMat;
+uniform float time;
+void main(){
+    vNormal = normalize(normalMatrix * normal);
+    viewMat = viewMatrix;
+    modelMat = modelMatrix;
+    vVertexCoord = vec4(position, 1.0);
+    vCameraCoord = modelViewMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * vCameraCoord;
+
+
+//    float maxOffLen = 0.1;
+//    vec2 p = uv * vec2(M_PI*2.0);
+//
+//    vec3 offset = normalize(normal) * vec3(sin(time * 4.0 + p.y ) * maxOffLen - maxOffLen);
+//
+//    gl_Position.x += offset.x;
+//    gl_Position.y += offset.y;
+//    gl_Position.z += offset.z;
+}
+    </script>
+    <script type="x-shader/x-fragment" id="fragmentShader">
+varying vec4 vVertexCoord;
+varying vec4 vCameraCoord;
+varying vec3 vNormal;
+varying mat4 viewMat;
+varying mat4 modelMat;
+uniform float time;
+uniform int shape;
+
+struct PointLight {
+  vec3 color;
+  vec3 position; // light position, in camera coordinates
+  float distance; // used for attenuation purposes. Since
+                  // we're writing our own shader, it can
+                  // really be anything we want (as long as
+                  // we assign it to our light in its
+                  // "distance" field
+};
+uniform PointLight pointLights[NUM_POINT_LIGHTS];
+
+const int MAX_MARCHING_STEPS = 255;
+const float MIN_DIST = 0.0;
+const float MAX_DIST = 100.0;
+const float PRECISION = 0.001;
+const float EPSILON = 0.0005;
+const float PI = 3.14159265359;
+const vec3 COLOR_BACKGROUND = vec3(.741, .675, .82) / 2.;
+const vec3 COLOR_AMBIENT = vec3(0.42, 0.20, 0.1) / 2.;
+
+mat2 rotate2d(float theta) {
+  float s = sin(theta), c = cos(theta);
+  return mat2(c, -s, s, c);
+}
+
+float sdSphere(vec3 p, float r, vec3 offset)
+{
+  return length(p - offset) - r;
+}
+
+float sdTorus( vec3 p, vec2 t )
+{
+  vec2 q = vec2(length(p.xz)-t.x,p.y);
+  return length(q)-t.y;
+}
+
+float sdRoundCone( vec3 p, float r1, float r2, float h )
+{
+  // sampling independent computations (only depend on shape)
+  float b = (r1-r2)/h;
+  float a = sqrt(1.0-b*b);
+
+  // sampling dependant computations
+  vec2 q = vec2( length(p.xz), p.y );
+  float k = dot(q,vec2(-b,a));
+  if( k<0.0 ) return length(q) - r1;
+  if( k>a*h ) return length(q-vec2(0.0,h)) - r2;
+  return dot(q, vec2(a,b) ) - r1;
+}
+
+float sdOctahedron( vec3 p, float s )
+{
+  p = abs(p);
+  float m = p.x+p.y+p.z-s;
+  vec3 q;
+       if( 3.0*p.x < m ) q = p.xyz;
+  else if( 3.0*p.y < m ) q = p.yzx;
+  else if( 3.0*p.z < m ) q = p.zxy;
+  else return m*0.57735027;
+
+  float k = clamp(0.5*(q.z-q.y+s),0.0,s);
+  return length(vec3(q.x,q.y-s+k,q.z-k));
+}
+
+float sdEllipsoid( vec3 p, vec3 r )
+{
+  float k0 = length(p/r);
+  float k1 = length(p/(r*r));
+  return k0*(k0-1.0)/k1;
+}
+
+float sdLink( vec3 p, float le, float r1, float r2 )
+{
+  vec3 q = vec3( p.x, max(abs(p.y)-le,0.0), p.z );
+  return length(vec2(length(q.xy)-r1,q.z)) - r2;
+}
+
+float scene(vec3 p) {
+  p -= vec3(0, 0, -1);
+  float d;
+  if (shape == 0) d = sdTorus(p, vec2(0.5, 0.1));
+  if (shape == 1) d = sdRoundCone(p, 0.2, 0.3, 0.5);
+  if (shape == 2) d = sdEllipsoid(p, vec3(0.3, 0.3, 0.5));
+  if (shape == 3) d = sdOctahedron(p, 0.5);
+  if (shape == 4) d = sdLink(p, 0.3, 0.5, 0.1);
+  if (shape == 5) d = sdTorus(p, vec2(0.5, 0.1));
+  return d;
+}
+
+float rayMarch(vec3 ro, vec3 rd) {
+  float depth = MIN_DIST;
+  float d; // distance ray has travelled
+
+  for (int i = 0; i < MAX_MARCHING_STEPS; i++) {
+    vec3 p = ro + depth * rd;
+    d = scene(p);
+    depth += d;
+    if (d < PRECISION || depth > MAX_DIST) break;
+  }
+
+  d = depth;
+
+  return d;
+}
+
+vec3 calcNormal(in vec3 p) {
+    vec2 e = vec2(1, -1) * EPSILON;
+    return normalize(
+      e.xyy * scene(p + e.xyy) +
+      e.yyx * scene(p + e.yyx) +
+      e.yxy * scene(p + e.yxy) +
+      e.xxx * scene(p + e.xxx));
+}
+
+void main()
+{
+  vec3 col = vec3(0.);
+  vec3 ro = (inverse(modelMat) * inverse(viewMat) * vec4(cameraPosition, 1.0)).xyz;
+
+  vec3 rd = normalize(vVertexCoord.xyz - ro);
+
+  float d = rayMarch(ro, rd); // signed distance value to closest object
+
+  vec4 addedLightsBg = vec4(0.0, 0.0, 0.0, 1.0);
+  for(int l = 0; l < NUM_POINT_LIGHTS; l++) {
+      vec3 lightDirection = normalize(vCameraCoord.xyz
+                            - pointLights[l].position);
+      addedLightsBg.rgb += clamp(dot(-lightDirection,
+                               vNormal), 0.0, 1.0)
+                         * pointLights[l].color;
+  }
+  if (d > MAX_DIST) {
+    col = addedLightsBg.rgb + COLOR_BACKGROUND; // ray didn't hit anything
+  } else {
+    vec3 p = ro + rd * d; // point discovered from ray marching
+    vec3 normal = calcNormal(p); // surface normal
+
+    vec4 addedLights = vec4(0.0, 0.0, 0.0, 1.0);
+    for(int l = 0; l < NUM_POINT_LIGHTS; l++) {
+        vec3 lightPositionVert = (inverse(modelMat) * inverse(viewMat) * vec4(pointLights[l].position, 1.0)).xyz;
+        vec3 lightDirection = normalize(p
+                              - lightPositionVert);
+        addedLights.rgb += clamp(dot(-lightDirection,
+                                 normal), 0.0, 1.0)
+                           * pointLights[l].color;
+    }
+
+    col = addedLights.rgb + COLOR_AMBIENT;
+  }
+
+  gl_FragColor = vec4(col, 1.0);
+}
+    </script>
+    <script type="module" src="sketch.js"></script>
+  </body>
+</html>
+

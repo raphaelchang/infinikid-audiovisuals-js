@@ -1,0 +1,20 @@
+{
+    "name": "wavy",
+    "main": "index.js",
+    "version": "0.0.1",
+    "description": "Wavy art with OSC sync using p5.js",
+    "author": "Raphael Chang",
+    "license": "(MIT OR GPL-2.0)",
+    "keywords": [
+        "Open Sound Control",
+        "OSC",
+        "sound",
+        "audio",
+        "music"
+    ],
+    "dependencies": {
+        "osc": "2.4.2",
+        "express": "4.17.1",
+        "ws": "7.5.3"
+    }
+}
